@@ -6,7 +6,9 @@ public enum MqttAttributes implements FlowFileAttributeKey {
 
     BROKER_URI("mqtt.broker.uri"),
     TOPIC("mqtt.topic"),
-    QOS("mqtt.qos");
+    QOS("mqtt.qos"),
+    DUPLICATE("mqtt.duplicate"),
+    RETAINED("mqtt.retained");
 
     private String key;
 

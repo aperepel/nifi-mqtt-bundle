@@ -190,7 +190,7 @@ public class GetMQTT extends AbstractProcessor {
                 attrs.put(MqttAttributes.BROKER_URI.key(), serverURI);
                 attrs.put(MqttAttributes.TOPIC.key(), msg.getTopic());
                 attrs.put(MqttAttributes.QOS.key(), String.valueOf(msg.getQos()));
-                session.putAllAttributes(flowFile, attrs);
+                flowFile = session.putAllAttributes(flowFile, attrs);
 
                 flowFile = session.write(flowFile, new OutputStreamCallback() {
                     @Override

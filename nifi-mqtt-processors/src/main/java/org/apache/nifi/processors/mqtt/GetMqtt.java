@@ -192,7 +192,7 @@ public class GetMQTT extends AbstractProcessor {
                 attrs.put(MqttAttributes.QOS.key(), String.valueOf(msg.getQos()));
                 session.putAllAttributes(flowFile, attrs);
 
-                session.write(flowFile, new OutputStreamCallback() {
+                flowFile = session.write(flowFile, new OutputStreamCallback() {
                     @Override
                     public void process(OutputStream out) throws IOException {
                         out.write(msg.getPayload());

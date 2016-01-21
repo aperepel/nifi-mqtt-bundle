@@ -18,6 +18,7 @@ import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.ProcessorInitializationContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.processor.io.OutputStreamCallback;
 import org.apache.nifi.processor.util.StandardValidators;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
@@ -27,11 +28,18 @@ import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 @Tags({"mqtt", "listen", "get"})
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
@@ -74,12 +82,21 @@ public class GetMQTT extends AbstractProcessor {
                                                                 .build();
 
 
-    public static final PropertyDescriptor PROPERTY_TOPIC = new PropertyDescriptor
-                                                                 .Builder().name("topic")
-                                                                 .description("MQTT topic to subscribe to. Single-level(+) and multi-level(#) syntax supported.")
+    public static final PropertyDescriptor PROPERTY_RECEIVE_BUFFER = new PropertyDescriptor
+                                                                 .Builder().name("receive-buffer-count")
+                                                                 .description("Max number of messages queued up by this subscriber before they get routed into NiFi. " +
+                                                                                      "This is a safety measure, as events must not be queueing up under normal conditions.")
                                                                  .required(true)
-                                                                 .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+                                                                 .defaultValue(String.valueOf(1000000))
+                                                                 .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
                                                                  .build();
+
+    public static final PropertyDescriptor PROPERTY_TOPIC = new PropertyDescriptor
+                                                                    .Builder().name("topic")
+                                                                .description("MQTT topic to subscribe to. Single-level(+) and multi-level(#) syntax supported.")
+                                                                .required(true)
+                                                                .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+                                                                .build();
 
 
     public static final Relationship RELATIONSHIP_SUCCESS = new Relationship.Builder()
@@ -102,6 +119,8 @@ public class GetMQTT extends AbstractProcessor {
     private Set<Relationship> relationships;
     private MqttClient mqttClient;
 
+    private BlockingQueue<org.apache.nifi.processors.mqtt.MqttMessage> msgBuffer = new LinkedBlockingQueue<>();
+
     @Override
     protected void init(ProcessorInitializationContext context) {
         final List<PropertyDescriptor> descriptors = new ArrayList<>();
@@ -110,6 +129,7 @@ public class GetMQTT extends AbstractProcessor {
         descriptors.add(PROPERTY_CLIENT_ID);
         descriptors.add(PROPERTY_QOS);
         descriptors.add(PROPERTY_TOPIC);
+//        descriptors.add(PROPERTY_RECEIVE_BUFFER);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
         final Set<Relationship> relationships = new HashSet<>();
@@ -131,7 +151,7 @@ public class GetMQTT extends AbstractProcessor {
 
     @OnStopped
     public void onStopped() {
-        if (mqttClient == null) {
+        if (mqttClient == null || !mqttClient.isConnected()) {
             return;
         }
         try {
@@ -150,18 +170,50 @@ public class GetMQTT extends AbstractProcessor {
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
         FlowFile flowFile = null;
 
-        if (flowFile == null) {
-            context.yield();
-            return;
-        }
-
         try {
-            String topic = context.getProperty(PROPERTY_TOPIC).getValue();
             connectMqttBroker(context);
-            mqttClient.subscribe(topic, context.getProperty(PROPERTY_QOS).asInteger());
+
+            if (msgBuffer.isEmpty()) {
+                context.yield();
+                return;
+            }
+
+            // avoid any size calls
+            List<org.apache.nifi.processors.mqtt.MqttMessage> work = new LinkedList<>();
+            msgBuffer.drainTo(work);
+
+            String serverURI = mqttClient.getServerURI();
+
+            for (final org.apache.nifi.processors.mqtt.MqttMessage msg : work) {
+                flowFile = session.create();
+                Map<String, String> attrs = new HashMap<>();
+                attrs.put(MqttAttributes.BROKER_URI.key(), serverURI);
+                attrs.put(MqttAttributes.TOPIC.key(), msg.getTopic());
+                attrs.put(MqttAttributes.QOS.key(), String.valueOf(msg.getQos()));
+                session.putAllAttributes(flowFile, attrs);
+
+                session.write(flowFile, new OutputStreamCallback() {
+                    @Override
+                    public void process(OutputStream out) throws IOException {
+                        out.write(msg.getPayload());
+                    }
+                });
+                String transitUri = new StringBuilder(serverURI).append("/")
+                                                         .append(msg.getTopic()).toString();
+                session.transfer(flowFile, RELATIONSHIP_SUCCESS);
+                session.getProvenanceReporter().receive(flowFile, transitUri);
+            }
         } catch (MqttException e) {
-            getLogger().warn("Failed to receive a MQTT message", e);
-            session.transfer(flowFile, RELATIONSHIP_FAILURE);
+            if (e.getCause() instanceof IOException) {
+                getLogger().warn("Failed to receive a MQTT message", e);
+                // TODO not sure it's the right thing to do in a receiver
+                session.penalize(flowFile);
+                session.transfer(flowFile, RELATIONSHIP_CONNECTION_FAILURE);
+            } else {
+                getLogger().error("Failed to process a message", e);
+                session.penalize(flowFile);
+                session.transfer(flowFile, RELATIONSHIP_FAILURE);
+            }
         }
 
     }
@@ -178,14 +230,18 @@ public class GetMQTT extends AbstractProcessor {
         if (StringUtils.isBlank(clientId)) {
             clientId = "NiFi-" + getIdentifier();
         }
+        String topic = context.getProperty(PROPERTY_TOPIC).getValue();
         // TODO persistence
         mqttClient = new MqttClient(brokerUri, clientId, new MemoryPersistence());
         MqttConnectOptions connOptions = new MqttConnectOptions();
 //            connOptions.setMqttVersion(MqttConnectOptions.MQTT_VERSION_DEFAULT);
         mqttClient.setCallback(new NiFiMqttCallback());
+        // TODO cleanSession property
         connOptions.setCleanSession(true);
         getLogger().info("Connecting to MQTT broker: {}", new String[] {brokerUri});
+
         mqttClient.connect(connOptions);
+        mqttClient.subscribe(topic, context.getProperty(PROPERTY_QOS).asInteger());
     }
 
     private class NiFiMqttCallback implements MqttCallback {
@@ -196,7 +252,10 @@ public class GetMQTT extends AbstractProcessor {
 
         @Override
         public void messageArrived(String topic, MqttMessage message) throws Exception {
+            // TODO switch to trace
             getLogger().info("Message arrived from topic {}. Paylod: {}", new Object[] {topic, message});
+            org.apache.nifi.processors.mqtt.MqttMessage msg = PahoMqttToMsgTransformer.fromPahoMsg(topic, message);
+            msgBuffer.put(msg);
         }
 
         @Override

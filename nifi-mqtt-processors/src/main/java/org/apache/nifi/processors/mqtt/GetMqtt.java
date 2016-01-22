@@ -164,6 +164,28 @@ public class GetMQTT extends AbstractProcessor {
                                                                 .required(true)
                                                                 .build();
 
+    public static final PropertyDescriptor PROPERTY_CONN_TIMEOUT = new PropertyDescriptor
+                                                                .Builder().name("connection-timeout-sec")
+                                                                .displayName("Connection Timeout (seconds)")
+                                                                .description("Maximum time interval the client will wait for the network connection to the MQTT server " +
+                                                                             "to be established. The default timeout is 30 seconds. " +
+                                                                             "A value of 0 disables timeout processing meaning the client will wait until the network connection is made successfully or fails.")
+                                                                .required(false)
+                                                                .defaultValue(String.valueOf(30))
+                                                                .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
+                                                                .build();
+
+    public static final PropertyDescriptor PROPERTY_KEEPALIVE_INTERVAL = new PropertyDescriptor
+                                                                 .Builder().name("keepalive-interval-sec")
+                                                                 .displayName("Keep Alive Interval (seconds)")
+                                                                 .description("Defines the maximum time interval between messages sent or received. It enables the " +
+                                                                              "client to detect if the server is no longer available, without having to wait for the TCP/IP timeout. " +
+                                                                              "The client will ensure that at least one message travels across the network within each keep alive period. In the absence of a data-related message during the time period, the client sends a very small \"ping\" message, which the server will acknowledge. A value of 0 disables keepalive processing in the client.")
+                                                                 .required(false)
+                                                                 .defaultValue(String.valueOf(60))
+                                                                 .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
+                                                                 .build();
+
 
     public static final Relationship RELATIONSHIP_SUCCESS = new Relationship.Builder()
                                                                .name("Success")
@@ -199,6 +221,8 @@ public class GetMQTT extends AbstractProcessor {
         descriptors.add(PROPERTY_TOPIC);
         descriptors.add(PROPERTY_CLEAN_SESSION);
         descriptors.add(PROPERTY_MQTT_VERSION);
+        descriptors.add(PROPERTY_CONN_TIMEOUT);
+        descriptors.add(PROPERTY_KEEPALIVE_INTERVAL);
 //        descriptors.add(PROPERTY_RECEIVE_BUFFER);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
@@ -337,8 +361,11 @@ public class GetMQTT extends AbstractProcessor {
                 connOptions.setPassword(p.toCharArray());
             }
         }
-        mqttClient.setCallback(new NiFiMqttCallback());
         connOptions.setCleanSession(context.getProperty(PROPERTY_CLEAN_SESSION).asBoolean());
+        connOptions.setConnectionTimeout(context.getProperty(PROPERTY_CONN_TIMEOUT).asInteger());
+        connOptions.setKeepAliveInterval(context.getProperty(PROPERTY_KEEPALIVE_INTERVAL).asInteger());
+
+        mqttClient.setCallback(new NiFiMqttCallback());
         if (getLogger().isInfoEnabled()) {
             getLogger().info("Connecting to MQTT broker: {} Subscription: {} Client ID: {}",
                              new String[] {brokerUri, topic, clientId});

@@ -166,6 +166,7 @@ public class GetMQTT extends AbstractProcessor {
 
     public static final PropertyDescriptor PROPERTY_CONN_TIMEOUT = new PropertyDescriptor
                                                                 .Builder().name("connection-timeout-sec")
+                                                                // TODO use idiomatic NiFi duration?
                                                                 .displayName("Connection Timeout (seconds)")
                                                                 .description("Maximum time interval the client will wait for the network connection to the MQTT server " +
                                                                              "to be established. The default timeout is 30 seconds. " +
@@ -177,6 +178,7 @@ public class GetMQTT extends AbstractProcessor {
 
     public static final PropertyDescriptor PROPERTY_KEEPALIVE_INTERVAL = new PropertyDescriptor
                                                                  .Builder().name("keepalive-interval-sec")
+                                                                 // TODO use idiomatic NiFi duration?
                                                                  .displayName("Keep Alive Interval (seconds)")
                                                                  .description("Defines the maximum time interval between messages sent or received. It enables the " +
                                                                               "client to detect if the server is no longer available, without having to wait for the TCP/IP timeout. " +
@@ -186,6 +188,46 @@ public class GetMQTT extends AbstractProcessor {
                                                                  .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
                                                                  .build();
 
+    public static final PropertyDescriptor PROPERTY_LWT_TOPIC = new PropertyDescriptor
+                                                                 .Builder().name("lwt-topic")
+                                                                 .displayName("'Last Will' Topic")
+                                                                 .description("A 'last will' message will be stored on the server and associated with the network connection. " +
+                                                                              "The will message is published when the connection is subsequently terminated for any reason other than a clean disconnect.")
+                                                                 .required(false)
+                                                                 .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+                                                                 .build();
+
+    public static final PropertyDescriptor PROPERTY_LWT_PAYLOAD = new PropertyDescriptor
+                                                                .Builder().name("lwt-payload")
+                                                                .displayName("'Last Will' Payload")
+                                                                .description("Actual 'last will' message to be sent.")
+                                                                .required(false)
+                                                                // can be zero-length, still valid (e.g. to remove LWT message from a broker)
+                                                                .addValidator(Validator.VALID)
+                                                                .build();
+
+    public static final PropertyDescriptor PROPERTY_LWT_QOS = new PropertyDescriptor
+                                                                 .Builder().name("lwt-qos")
+                                                                 .displayName("'Last Will' QoS Level")
+                                                                 .description("QoS level to be used when publishing the Will Message")
+                                                                 .required(true)
+                                                                 .defaultValue(ALLOWABLE_VALUE_QOS_0.getValue())
+                                                                 .allowableValues(
+                                                                    ALLOWABLE_VALUE_QOS_0,
+                                                                    ALLOWABLE_VALUE_QOS_1,
+                                                                    ALLOWABLE_VALUE_QOS_2
+                                                                 )
+                                                                 .build();
+
+    public static final PropertyDescriptor PROPERTY_LWT_RETAIN = new PropertyDescriptor
+                                                                 .Builder().name("lwt-retain")
+                                                                 .displayName("'Last Will' Retain")
+                                                                 .description("Specifies if the Will Message is to be Retained when it is published")
+                                                                 .required(true)
+                                                                 .defaultValue(Boolean.TRUE.toString())
+                                                                 .allowableValues(Boolean.TRUE.toString(), Boolean.FALSE.toString())
+                                                                 .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
+                                                                 .build();
 
     public static final Relationship RELATIONSHIP_SUCCESS = new Relationship.Builder()
                                                                .name("Success")
@@ -224,6 +266,10 @@ public class GetMQTT extends AbstractProcessor {
         descriptors.add(PROPERTY_CONN_TIMEOUT);
         descriptors.add(PROPERTY_KEEPALIVE_INTERVAL);
 //        descriptors.add(PROPERTY_RECEIVE_BUFFER);
+        descriptors.add(PROPERTY_LWT_TOPIC);
+        descriptors.add(PROPERTY_LWT_PAYLOAD);
+        descriptors.add(PROPERTY_LWT_QOS);
+        descriptors.add(PROPERTY_LWT_RETAIN);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
         final Set<Relationship> relationships = new HashSet<>();
@@ -364,13 +410,26 @@ public class GetMQTT extends AbstractProcessor {
         connOptions.setCleanSession(context.getProperty(PROPERTY_CLEAN_SESSION).asBoolean());
         connOptions.setConnectionTimeout(context.getProperty(PROPERTY_CONN_TIMEOUT).asInteger());
         connOptions.setKeepAliveInterval(context.getProperty(PROPERTY_KEEPALIVE_INTERVAL).asInteger());
+        String lwtTopic = context.getProperty(PROPERTY_LWT_TOPIC).getValue();
+        String lwtPayload = context.getProperty(PROPERTY_LWT_PAYLOAD).getValue();
+        Integer lwtQos = context.getProperty(PROPERTY_LWT_QOS).asInteger();
+        Boolean lwtRetain = context.getProperty(PROPERTY_LWT_RETAIN).asBoolean();
 
-        mqttClient.setCallback(new NiFiMqttCallback());
+        if (StringUtils.isNotBlank(lwtTopic)) {
+            connOptions.setWill(lwtTopic,
+                    lwtPayload.getBytes(),
+                    lwtQos,
+                    lwtRetain);
+        }
+
         if (getLogger().isInfoEnabled()) {
+            getLogger().info("LWT: topic={}, qos={}, retain={}, payload={}",
+                             new Object[] {lwtTopic, lwtQos, lwtRetain, lwtPayload});
             getLogger().info("Connecting to MQTT broker: {} Subscription: {} Client ID: {}",
                              new String[] {brokerUri, topic, clientId});
         }
 
+        mqttClient.setCallback(new NiFiMqttCallback());
         mqttClient.connect(connOptions);
         mqttClient.subscribe(topic, context.getProperty(PROPERTY_QOS).asInteger());
     }

@@ -189,7 +189,10 @@ public class GetMQTT extends AbstractProcessor {
                 Map<String, String> attrs = new HashMap<>();
                 attrs.put(MqttAttributes.BROKER_URI.key(), serverURI);
                 attrs.put(MqttAttributes.TOPIC.key(), msg.getTopic());
+                attrs.put(MqttAttributes.DUPLICATE.key(), String.valueOf(msg.isDuplicate()));
+                attrs.put(MqttAttributes.RETAINED.key(), String.valueOf(msg.isRetained()));
                 attrs.put(MqttAttributes.QOS.key(), String.valueOf(msg.getQos()));
+
                 flowFile = session.putAllAttributes(flowFile, attrs);
 
                 flowFile = session.write(flowFile, new OutputStreamCallback() {
@@ -198,8 +201,7 @@ public class GetMQTT extends AbstractProcessor {
                         out.write(msg.getPayload());
                     }
                 });
-                String transitUri = new StringBuilder(serverURI).append("/")
-                                                         .append(msg.getTopic()).toString();
+                String transitUri = new StringBuilder(serverURI).append(msg.getTopic()).toString();
                 session.transfer(flowFile, RELATIONSHIP_SUCCESS);
                 session.getProvenanceReporter().receive(flowFile, transitUri);
             }

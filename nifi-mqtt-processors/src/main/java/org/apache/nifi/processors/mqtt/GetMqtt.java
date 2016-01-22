@@ -4,6 +4,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
+import org.apache.nifi.annotation.behavior.TriggerSerially;
 import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
@@ -41,8 +42,15 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
+import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_CLEAN_SESSION_TRUE;
+import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_CLEAN_SESSION_FALSE;
+import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_QOS_0;
+import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_QOS_1;
+import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_QOS_2;
+
 @Tags({"mqtt", "listen", "get"})
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
+@TriggerSerially // we want to have a consistent mapping between clientID and MQTT connection
 @CapabilityDescription("Subscribe to a MQTT broker topic(s)")
 @SeeAlso()
 @ReadsAttributes({@ReadsAttribute(attribute="", description="")})
@@ -67,6 +75,7 @@ public class GetMQTT extends AbstractProcessor {
 
     public static final PropertyDescriptor PROPERTY_CLIENT_ID = new PropertyDescriptor
                                                                  .Builder().name("clientId")
+                                                                 .displayName("Client ID")
                                                                  .description("MQTT subscribing client ID. Will be generated if not provided.")
                                                                  .required(false)
                                                                  .build();
@@ -74,16 +83,34 @@ public class GetMQTT extends AbstractProcessor {
 
     public static final PropertyDescriptor PROPERTY_QOS = new PropertyDescriptor
                                                                 .Builder().name("qos")
+                                                                .displayName("Quality of Service")
                                                                 .description("MQTT Quality of Service (0, 1 or 2)")
                                                                 .required(true)
+                                                                .allowableValues(
+                                                                    ALLOWABLE_VALUE_QOS_0,
+                                                                    ALLOWABLE_VALUE_QOS_1,
+                                                                    ALLOWABLE_VALUE_QOS_2
+                                                                )
                                                                 .defaultValue("0")
-                                                                // TODO custom QoS validator
-                                                                .addValidator(StandardValidators.INTEGER_VALIDATOR)
                                                                 .build();
 
+    public static final PropertyDescriptor PROPERTY_CLEAN_SESSION = new PropertyDescriptor
+                                                                  .Builder().name("clean-session")
+                                                                  .displayName("Session state")
+                                                                  .description("With a clean session any previous state for this client will be discarded on both the server and client side")
+                                                                  .required(true)
+                                                                  .allowableValues(
+                                                                      ALLOWABLE_VALUE_CLEAN_SESSION_TRUE,
+                                                                      ALLOWABLE_VALUE_CLEAN_SESSION_FALSE
+                                                                  )
+                                                                  .defaultValue(ALLOWABLE_VALUE_CLEAN_SESSION_TRUE.getValue())
+                                                                  .build();
 
+
+    // TODO expose in the UI and find the right place to flush/re-init on value change
     public static final PropertyDescriptor PROPERTY_RECEIVE_BUFFER = new PropertyDescriptor
                                                                  .Builder().name("receive-buffer-count")
+                                                                 .displayName("Receive Buffer Count")
                                                                  .description("Max number of messages queued up by this subscriber before they get routed into NiFi. " +
                                                                                       "This is a safety measure, as events must not be queueing up under normal conditions.")
                                                                  .required(true)
@@ -92,7 +119,8 @@ public class GetMQTT extends AbstractProcessor {
                                                                  .build();
 
     public static final PropertyDescriptor PROPERTY_TOPIC = new PropertyDescriptor
-                                                                    .Builder().name("topic")
+                                                                .Builder().name("topic")
+                                                                .displayName("Topic")
                                                                 .description("MQTT topic to subscribe to. Single-level(+) and multi-level(#) syntax supported.")
                                                                 .required(true)
                                                                 .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
@@ -129,6 +157,7 @@ public class GetMQTT extends AbstractProcessor {
         descriptors.add(PROPERTY_CLIENT_ID);
         descriptors.add(PROPERTY_QOS);
         descriptors.add(PROPERTY_TOPIC);
+        descriptors.add(PROPERTY_CLEAN_SESSION);
 //        descriptors.add(PROPERTY_RECEIVE_BUFFER);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
@@ -224,7 +253,6 @@ public class GetMQTT extends AbstractProcessor {
         if (mqttClient != null && mqttClient.isConnected()) {
             return;
         }
-
         String brokerUri = String.format("tcp://%s:%d",
                 context.getProperty(PROPERTY_BROKER_HOSTNAME).getValue(),
                 context.getProperty(PROPERTY_BROKER_PORT).asInteger());
@@ -238,8 +266,7 @@ public class GetMQTT extends AbstractProcessor {
         MqttConnectOptions connOptions = new MqttConnectOptions();
 //            connOptions.setMqttVersion(MqttConnectOptions.MQTT_VERSION_DEFAULT);
         mqttClient.setCallback(new NiFiMqttCallback());
-        // TODO cleanSession property
-        connOptions.setCleanSession(true);
+        connOptions.setCleanSession(context.getProperty(PROPERTY_CLEAN_SESSION).asBoolean());
         getLogger().info("Connecting to MQTT broker: {}", new String[] {brokerUri});
 
         mqttClient.connect(connOptions);

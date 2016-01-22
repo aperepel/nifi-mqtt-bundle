@@ -7,7 +7,7 @@
 - `PutMQTT` (Doh, but I want to get `GetMQTT` solid, after which it will be easy to refactor common code) 
 - No action taken on the client side to guarantee QoS 2, limited support
 - Only TCP support, no SSL or WebSockets
-- Last Will Topics
+- ~~Last Will Topics~~ Done.
  
 ## Notes:
 - The `GetMQTT` processor will not allow raising its concurrency beyond 1. This was an *explicit design choice*.

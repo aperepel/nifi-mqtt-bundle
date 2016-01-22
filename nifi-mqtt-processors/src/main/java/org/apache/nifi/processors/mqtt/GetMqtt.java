@@ -59,6 +59,7 @@ public class GetMQTT extends AbstractProcessor {
 
     public static final PropertyDescriptor PROPERTY_BROKER_HOSTNAME = new PropertyDescriptor
                                                                  .Builder().name("host")
+                                                                 .displayName("Broker host name")
                                                                  .description("MQTT broker host")
                                                                  .required(true)
                                                                  .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
@@ -66,7 +67,8 @@ public class GetMQTT extends AbstractProcessor {
 
     public static final PropertyDescriptor PROPERTY_BROKER_PORT = new PropertyDescriptor
                                                                  .Builder().name("port")
-                                                                 .description("MQTT broker port")
+                                                                 .displayName("Broker port")
+                                                                 .description("MQTT protocol broker port")
                                                                  .required(true)
                                                                  // TODO optional in fact: 1883 for non-secure, 8883 for secure
                                                                  .defaultValue("1883")
@@ -84,20 +86,20 @@ public class GetMQTT extends AbstractProcessor {
     public static final PropertyDescriptor PROPERTY_QOS = new PropertyDescriptor
                                                                 .Builder().name("qos")
                                                                 .displayName("Quality of Service")
-                                                                .description("MQTT Quality of Service (0, 1 or 2)")
+                                                                .description("MQTT Quality of Service (0, 1 or 2). See individual values descriptions for complete semantics.")
                                                                 .required(true)
                                                                 .allowableValues(
                                                                     ALLOWABLE_VALUE_QOS_0,
                                                                     ALLOWABLE_VALUE_QOS_1,
                                                                     ALLOWABLE_VALUE_QOS_2
                                                                 )
-                                                                .defaultValue("0")
+                                                                .defaultValue(ALLOWABLE_VALUE_QOS_0.getValue())
                                                                 .build();
 
     public static final PropertyDescriptor PROPERTY_CLEAN_SESSION = new PropertyDescriptor
                                                                   .Builder().name("clean-session")
                                                                   .displayName("Session state")
-                                                                  .description("With a clean session any previous state for this client will be discarded on both the server and client side")
+                                                                  .description("Whether to start afresh or resume previous flows. See detailed descriptions for each value.")
                                                                   .required(true)
                                                                   .allowableValues(
                                                                       ALLOWABLE_VALUE_CLEAN_SESSION_TRUE,

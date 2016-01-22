@@ -11,6 +11,7 @@ import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
+import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
@@ -182,6 +183,14 @@ public class GetMQTT extends AbstractProcessor {
 
     @OnStopped
     public void onStopped() {
+        if (getLogger().isTraceEnabled()) {
+            if (msgBuffer.isEmpty()) {
+                getLogger().trace("(@OnStopped) Work queue is now empty");
+            } else {
+                getLogger().trace("(@OnStopped) Work queue still has {} items", new Object[] {msgBuffer.size()});
+            }
+        }
+
         if (mqttClient == null || !mqttClient.isConnected()) {
             return;
         }
@@ -253,6 +262,17 @@ public class GetMQTT extends AbstractProcessor {
             }
         }
 
+    }
+
+    @OnUnscheduled
+    public void onUnscheduled() {
+        if (getLogger().isTraceEnabled()) {
+            if (msgBuffer.isEmpty()) {
+                getLogger().trace("(@OnUnscheduled) Work queue is now empty");
+            } else {
+                getLogger().trace("(@OnUnscheduled) Work queue still has {} items", new Object[] {msgBuffer.size()});
+            }
+        }
     }
 
     private void connectMqttBroker(ProcessContext context) throws MqttException {

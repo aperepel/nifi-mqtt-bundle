@@ -13,6 +13,7 @@ import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.ProcessContext;
@@ -76,11 +77,32 @@ public class GetMQTT extends AbstractProcessor {
                                                                  .addValidator(StandardValidators.PORT_VALIDATOR)
                                                                  .build();
 
+    public static final PropertyDescriptor PROPERTY_BROKER_USERNAME = new PropertyDescriptor
+                                                                 .Builder().name("username")
+                                                                 .displayName("Username")
+                                                                 .required(false)
+                                                                 .defaultValue(null)
+                                                                  // no validator, empty values allowed
+                                                                 .addValidator(Validator.VALID)
+                                                                 .build();
+
+    public static final PropertyDescriptor PROPERTY_BROKER_PASSWORD = new PropertyDescriptor
+                                                                 .Builder().name("password")
+                                                                 .displayName("Password")
+                                                                 .required(false)
+                                                                 // no validator, empty values allowed
+                                                                 .addValidator(Validator.VALID)
+                                                                 .defaultValue(null)
+                                                                 .sensitive(true)
+                                                                 .build();
+
+
     public static final PropertyDescriptor PROPERTY_CLIENT_ID = new PropertyDescriptor
                                                                  .Builder().name("clientId")
                                                                  .displayName("Client ID")
                                                                  .description("MQTT subscribing client ID. Will be generated if not provided.")
                                                                  .required(false)
+                                                                 .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
                                                                  .build();
 
 
@@ -129,6 +151,19 @@ public class GetMQTT extends AbstractProcessor {
                                                                 .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
                                                                 .build();
 
+    public static final PropertyDescriptor PROPERTY_MQTT_VERSION = new PropertyDescriptor
+                                                                .Builder().name("mqtt-version")
+                                                                .displayName("MQTT Spec Version")
+                                                                .description("MQTT specification version")
+                                                                .allowableValues(
+                                                                        MqttNiFiConstants.ALLOWABLE_VALUE_MQTT_VERSION_AUTO,
+                                                                        MqttNiFiConstants.ALLOWABLE_VALUE_MQTT_VERSION_311,
+                                                                        MqttNiFiConstants.ALLOWABLE_VALUE_MQTT_VERSION_310
+                                                                )
+                                                                .defaultValue(MqttNiFiConstants.ALLOWABLE_VALUE_MQTT_VERSION_AUTO.getValue())
+                                                                .required(true)
+                                                                .build();
+
 
     public static final Relationship RELATIONSHIP_SUCCESS = new Relationship.Builder()
                                                                .name("Success")
@@ -157,10 +192,13 @@ public class GetMQTT extends AbstractProcessor {
         final List<PropertyDescriptor> descriptors = new ArrayList<>();
         descriptors.add(PROPERTY_BROKER_HOSTNAME);
         descriptors.add(PROPERTY_BROKER_PORT);
+        descriptors.add(PROPERTY_BROKER_USERNAME);
+        descriptors.add(PROPERTY_BROKER_PASSWORD);
         descriptors.add(PROPERTY_CLIENT_ID);
         descriptors.add(PROPERTY_QOS);
         descriptors.add(PROPERTY_TOPIC);
         descriptors.add(PROPERTY_CLEAN_SESSION);
+        descriptors.add(PROPERTY_MQTT_VERSION);
 //        descriptors.add(PROPERTY_RECEIVE_BUFFER);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
@@ -290,7 +328,15 @@ public class GetMQTT extends AbstractProcessor {
         // TODO persistence
         mqttClient = new MqttClient(brokerUri, clientId, new MemoryPersistence());
         MqttConnectOptions connOptions = new MqttConnectOptions();
-//            connOptions.setMqttVersion(MqttConnectOptions.MQTT_VERSION_DEFAULT);
+        connOptions.setMqttVersion(context.getProperty(PROPERTY_MQTT_VERSION).asInteger());
+        String userProperty = context.getProperty(PROPERTY_BROKER_USERNAME).getValue();
+        if (userProperty != null) {
+            connOptions.setUserName(userProperty);
+            String p = context.getProperty(PROPERTY_BROKER_PASSWORD).getValue();
+            if (p != null) {
+                connOptions.setPassword(p.toCharArray());
+            }
+        }
         mqttClient.setCallback(new NiFiMqttCallback());
         connOptions.setCleanSession(context.getProperty(PROPERTY_CLEAN_SESSION).asBoolean());
         if (getLogger().isInfoEnabled()) {

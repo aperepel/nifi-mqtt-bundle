@@ -42,8 +42,8 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
-import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_CLEAN_SESSION_TRUE;
 import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_CLEAN_SESSION_FALSE;
+import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_CLEAN_SESSION_TRUE;
 import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_QOS_0;
 import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_QOS_1;
 import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_QOS_2;
@@ -114,7 +114,7 @@ public class GetMQTT extends AbstractProcessor {
                                                                  .Builder().name("receive-buffer-count")
                                                                  .displayName("Receive Buffer Count")
                                                                  .description("Max number of messages queued up by this subscriber before they get routed into NiFi. " +
-                                                                                      "This is a safety measure, as events must not be queueing up under normal conditions.")
+                                                                              "This is a safety measure, as events must not be queueing up under normal conditions.")
                                                                  .required(true)
                                                                  .defaultValue(String.valueOf(1000000))
                                                                  .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
@@ -213,6 +213,10 @@ public class GetMQTT extends AbstractProcessor {
             List<org.apache.nifi.processors.mqtt.MqttMessage> work = new LinkedList<>();
             msgBuffer.drainTo(work);
 
+            if (getLogger().isTraceEnabled()) {
+                getLogger().trace("Incoming work queue size: {}", new Object[] { work.size() });
+            }
+
             String serverURI = mqttClient.getServerURI();
 
             for (final org.apache.nifi.processors.mqtt.MqttMessage msg : work) {
@@ -269,7 +273,10 @@ public class GetMQTT extends AbstractProcessor {
 //            connOptions.setMqttVersion(MqttConnectOptions.MQTT_VERSION_DEFAULT);
         mqttClient.setCallback(new NiFiMqttCallback());
         connOptions.setCleanSession(context.getProperty(PROPERTY_CLEAN_SESSION).asBoolean());
-        getLogger().info("Connecting to MQTT broker: {}", new String[] {brokerUri});
+        if (getLogger().isInfoEnabled()) {
+            getLogger().info("Connecting to MQTT broker: {} Subscription: {} Client ID: {}",
+                             new String[] {brokerUri, topic, clientId});
+        }
 
         mqttClient.connect(connOptions);
         mqttClient.subscribe(topic, context.getProperty(PROPERTY_QOS).asInteger());
@@ -283,8 +290,9 @@ public class GetMQTT extends AbstractProcessor {
 
         @Override
         public void messageArrived(String topic, MqttMessage message) throws Exception {
-            // TODO switch to trace
-            getLogger().info("Message arrived from topic {}. Paylod: {}", new Object[] {topic, message});
+            if (getLogger().isDebugEnabled()) {
+                getLogger().debug("Message arrived from topic {}. Paylod: {}", new Object[] {topic, message});
+            }
             org.apache.nifi.processors.mqtt.MqttMessage msg = PahoMqttToMsgTransformer.fromPahoMsg(topic, message);
             msgBuffer.put(msg);
         }

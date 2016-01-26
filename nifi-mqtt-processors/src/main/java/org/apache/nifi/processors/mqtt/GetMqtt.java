@@ -1,14 +1,12 @@
 package org.apache.nifi.processors.mqtt;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.nifi.annotation.behavior.InputRequirement;
-import org.apache.nifi.annotation.behavior.ReadsAttribute;
-import org.apache.nifi.annotation.behavior.ReadsAttributes;
 import org.apache.nifi.annotation.behavior.TriggerSerially;
 import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
-import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
@@ -362,18 +360,11 @@ public class GetMQTT extends AbstractProcessor {
                 session.getProvenanceReporter().receive(flowFile, transitUri);
             }
         } catch (MqttException e) {
-            if (e.getCause() instanceof IOException) {
-                getLogger().warn("Failed to receive a MQTT message", e);
-                // TODO not sure it's the right thing to do in a receiver
-                session.penalize(flowFile);
-                session.transfer(flowFile, RELATIONSHIP_CONNECTION_FAILURE);
-            } else {
-                getLogger().error("Failed to process a message", e);
-                session.penalize(flowFile);
-                session.transfer(flowFile, RELATIONSHIP_FAILURE);
-            }
+            context.yield();
+            session.rollback(true);
+            getLogger().error("Failed to receive a message", e);
+            throw new ProcessException(ExceptionUtils.getRootCauseMessage(e), ExceptionUtils.getRootCause(e));
         }
-
     }
 
     @OnUnscheduled

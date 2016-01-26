@@ -399,9 +399,9 @@ public class GetMQTT extends AbstractProcessor {
         mqttClient = new MqttClient(brokerUri, clientId, new MemoryPersistence());
         MqttConnectOptions connOptions = new MqttConnectOptions();
         connOptions.setMqttVersion(context.getProperty(PROPERTY_MQTT_VERSION).asInteger());
-        String userProperty = context.getProperty(PROPERTY_BROKER_USERNAME).getValue();
-        if (userProperty != null) {
-            connOptions.setUserName(userProperty);
+        String user = context.getProperty(PROPERTY_BROKER_USERNAME).getValue();
+        if (user != null) {
+            connOptions.setUserName(user);
             String p = context.getProperty(PROPERTY_BROKER_PASSWORD).getValue();
             if (p != null) {
                 connOptions.setPassword(p.toCharArray());
@@ -417,9 +417,9 @@ public class GetMQTT extends AbstractProcessor {
 
         if (StringUtils.isNotBlank(lwtTopic)) {
             connOptions.setWill(lwtTopic,
-                    lwtPayload.getBytes(),
-                    lwtQos,
-                    lwtRetain);
+                                lwtPayload.getBytes(),
+                                lwtQos,
+                                lwtRetain);
         }
 
         if (getLogger().isInfoEnabled()) {

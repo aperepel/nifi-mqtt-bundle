@@ -54,9 +54,13 @@ import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
 @TriggerSerially // we want to have a consistent mapping between clientID and MQTT connection
 @CapabilityDescription("Subscribe to a MQTT broker topic(s)")
-@SeeAlso()
-@ReadsAttributes({@ReadsAttribute(attribute="", description="")})
-@WritesAttributes({@WritesAttribute(attribute="", description="")})
+@WritesAttributes({
+                          @WritesAttribute(attribute="mqtt.topic", description="MQTT topic a message was received from"),
+                          @WritesAttribute(attribute = "mqtt.qos", description = "Quality of Service level associated with a received message"),
+                          @WritesAttribute(attribute = "mqtt.duplicate", description = "Whether a received message was a duplicate (e.g. redelivered)"),
+                          @WritesAttribute(attribute = "mqtt.retained", description = "Whether a received message had a retained flag set")
+})
+//@SeeAlso()
 public class GetMQTT extends AbstractProcessor {
 
     public static final PropertyDescriptor PROPERTY_BROKER_HOSTNAME = new PropertyDescriptor

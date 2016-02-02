@@ -438,7 +438,14 @@ public class GetMQTT extends AbstractProcessor {
         @Override
         public void messageArrived(String topic, MqttMessage message) throws Exception {
             if (getLogger().isDebugEnabled()) {
-                getLogger().debug("Message arrived from topic {}. Paylod: {}", new Object[] {topic, message});
+                byte[] payload = message.getPayload();
+                String text = new String(payload, "UTF-8");
+                if (StringUtils.isAsciiPrintable(text)) {
+                    getLogger().debug("Message arrived from topic {}. Paylod: {}", new Object[] {topic, text});
+                } else {
+                    getLogger().debug("Message arrived from topic {}. Binary value of size {}", new Object[] {topic, payload.length});
+                }
+
             }
             org.apache.nifi.processors.mqtt.MqttMessage msg = PahoMqttToMsgTransformer.fromPahoMsg(topic, message);
             msgBuffer.put(msg);

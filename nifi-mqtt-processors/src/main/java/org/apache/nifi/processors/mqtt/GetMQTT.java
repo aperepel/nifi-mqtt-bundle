@@ -13,9 +13,10 @@ import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.AbstractSessionFactoryProcessor;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.ProcessSessionFactory;
 import org.apache.nifi.processor.ProcessorInitializationContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
@@ -59,7 +60,7 @@ import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_
                           @WritesAttribute(attribute = "mqtt.retained", description = "Whether a received message had a retained flag set")
 })
 //@SeeAlso()
-public class GetMQTT extends AbstractProcessor {
+public class GetMQTT extends AbstractSessionFactoryProcessor {
 
     public static final PropertyDescriptor PROPERTY_BROKER_HOSTNAME = new PropertyDescriptor
                                                                  .Builder().name("host")
@@ -253,6 +254,8 @@ public class GetMQTT extends AbstractProcessor {
 
     private BlockingQueue<org.apache.nifi.processors.mqtt.MqttMessage> msgBuffer = new LinkedBlockingQueue<>();
 
+    private volatile ProcessSession session;
+
     @Override
     protected void init(ProcessorInitializationContext context) {
         final List<PropertyDescriptor> descriptors = new ArrayList<>();
@@ -316,9 +319,15 @@ public class GetMQTT extends AbstractProcessor {
         }
     }
 
+
     @Override
-    public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        FlowFile flowFile = null;
+    public void onTrigger(ProcessContext context, ProcessSessionFactory sessionFactory) throws ProcessException {
+        session = sessionFactory.createSession();
+
+        FlowFile flowFile;
+
+        // avoid any size calls
+        List<org.apache.nifi.processors.mqtt.MqttMessage> work = null;
 
         try {
             connectMqttBroker(context);
@@ -328,53 +337,72 @@ public class GetMQTT extends AbstractProcessor {
                 return;
             }
 
-            // avoid any size calls
-            List<org.apache.nifi.processors.mqtt.MqttMessage> work = new LinkedList<>();
+            work = new LinkedList<>();
             msgBuffer.drainTo(work);
 
             if (getLogger().isTraceEnabled()) {
-                getLogger().trace("Incoming work queue size: {}", new Object[] { work.size() });
+                getLogger().trace("Incoming work queue size: {}", new Object[]{work.size()});
             }
 
-            String serverURI = mqttClient.getServerURI();
+            pushMessages(work);
 
-            for (final org.apache.nifi.processors.mqtt.MqttMessage msg : work) {
-                flowFile = session.create();
-                Map<String, String> attrs = new HashMap<>();
-                attrs.put(MqttAttributes.BROKER_URI.key(), serverURI);
-                attrs.put(MqttAttributes.TOPIC.key(), msg.getTopic());
-                attrs.put(MqttAttributes.DUPLICATE.key(), String.valueOf(msg.isDuplicate()));
-                attrs.put(MqttAttributes.RETAINED.key(), String.valueOf(msg.isRetained()));
-                attrs.put(MqttAttributes.QOS.key(), String.valueOf(msg.getQos()));
-
-                flowFile = session.putAllAttributes(flowFile, attrs);
-
-                flowFile = session.write(flowFile, new OutputStreamCallback() {
-                    @Override
-                    public void process(OutputStream out) throws IOException {
-                        out.write(msg.getPayload());
-                    }
-                });
-                String transitUri = new StringBuilder(serverURI).append(msg.getTopic()).toString();
-                session.transfer(flowFile, RELATIONSHIP_SUCCESS);
-                session.getProvenanceReporter().receive(flowFile, transitUri);
-            }
-        } catch (MqttException e) {
+            session.commit();
+        } catch (Throwable t) {
             context.yield();
+            getLogger().error("{} failed to process due to {}; rolling back session", new Object[]{this, t});
             session.rollback(true);
-            getLogger().error("Failed to receive a message", e);
-            throw new ProcessException(ExceptionUtils.getRootCauseMessage(e), ExceptionUtils.getRootCause(e));
+            if (work != null && !work.isEmpty()) {
+                msgBuffer.addAll(work);
+                if (getLogger().isTraceEnabled()) {
+                    getLogger().trace("Session is being rolled back. Returning {} items to the work queue",
+                                      new Object[]{work.size()});
+                }
+            }
+            throw new ProcessException(ExceptionUtils.getRootCauseMessage(t),
+                                       ExceptionUtils.getRootCause(t));
+        }
+
+    }
+
+    private void pushMessages(List<org.apache.nifi.processors.mqtt.MqttMessage> work) {
+        FlowFile flowFile;
+        String serverURI = mqttClient.getServerURI();
+
+        for (final org.apache.nifi.processors.mqtt.MqttMessage msg : work) {
+            flowFile = session.create();
+            Map<String, String> attrs = new HashMap<>();
+            attrs.put(MqttAttributes.BROKER_URI.key(), serverURI);
+            attrs.put(MqttAttributes.TOPIC.key(), msg.getTopic());
+            attrs.put(MqttAttributes.DUPLICATE.key(), String.valueOf(msg.isDuplicate()));
+            attrs.put(MqttAttributes.RETAINED.key(), String.valueOf(msg.isRetained()));
+            attrs.put(MqttAttributes.QOS.key(), String.valueOf(msg.getQos()));
+
+            flowFile = session.putAllAttributes(flowFile, attrs);
+
+            flowFile = session.write(flowFile, new OutputStreamCallback() {
+                @Override
+                public void process(OutputStream out) throws IOException {
+                    out.write(msg.getPayload());
+                }
+            });
+            String transitUri = new StringBuilder(serverURI).append(msg.getTopic()).toString();
+            session.transfer(flowFile, RELATIONSHIP_SUCCESS);
+            session.getProvenanceReporter().receive(flowFile, transitUri);
         }
     }
 
     @OnUnscheduled
     public void onUnscheduled() {
-        if (getLogger().isTraceEnabled()) {
-            if (msgBuffer.isEmpty()) {
-                getLogger().trace("(@OnUnscheduled) Work queue is now empty");
-            } else {
-                getLogger().trace("(@OnUnscheduled) Work queue still has {} items", new Object[] {msgBuffer.size()});
+        // at this point there won't be synchronization issues,
+        // as @TriggerSerially guarantees nothing else is consuming from the msgBuffer
+        if (!msgBuffer.isEmpty()) {
+            List work = new LinkedList<>();
+            msgBuffer.drainTo(work);
+            if (getLogger().isTraceEnabled()) {
+                getLogger().trace("(@OnUnscheduled) Processing {} laggard items", new Object[] {work.size()});
             }
+
+            pushMessages(work);
         }
     }
 

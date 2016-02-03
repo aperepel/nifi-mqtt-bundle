@@ -312,6 +312,7 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
             }
 
             pushMessages(work);
+            session.commit();
         }
 
         if (getLogger().isTraceEnabled()) {
@@ -386,6 +387,9 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
 
     }
 
+    /**
+     * Doesn't commit a session, leaving it up to the caller.
+     */
     private void pushMessages(List<org.apache.nifi.processors.mqtt.MqttMessage> work) {
         FlowFile flowFile;
         String serverURI = mqttClient.getServerURI();

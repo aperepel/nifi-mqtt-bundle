@@ -1,6 +1,7 @@
 package org.apache.nifi.processors.mqtt;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.concurrent.BasicThreadFactory;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.TriggerSerially;
@@ -9,7 +10,6 @@ import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
-import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
@@ -44,7 +44,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_CLEAN_SESSION_FALSE;
 import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_CLEAN_SESSION_TRUE;
@@ -255,7 +260,7 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
     private List<PropertyDescriptor> descriptors;
 
     private Set<Relationship> relationships;
-    private MqttClient mqttClient;
+    private volatile MqttClient mqttClient;
 
     // we swap the buffer instances on resize, additionally make the ref volatile
     private volatile BlockingQueue<org.apache.nifi.processors.mqtt.MqttMessage> msgBuffer;
@@ -300,31 +305,6 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
         return descriptors;
     }
 
-    @OnStopped
-    public void onStopped() {
-        disconnectMqtt();
-
-        while (!msgBuffer.isEmpty()) {
-            List work = new LinkedList<>();
-            msgBuffer.drainTo(work);
-            if (getLogger().isTraceEnabled()) {
-                getLogger().trace("(@OnStopped) Processing {} laggard items", new Object[] {work.size()});
-            }
-
-            pushMessages(work);
-            session.commit();
-        }
-
-        if (getLogger().isTraceEnabled()) {
-            if (msgBuffer.isEmpty()) {
-                getLogger().trace("(@OnStopped) Work queue is now empty");
-            } else {
-                // must never happen
-                getLogger().trace("(@OnStopped) Work queue still has {} items", new Object[] {msgBuffer.size()});
-            }
-        }
-    }
-
     private void disconnectMqtt() {
         if (mqttClient == null) {
             return;
@@ -341,7 +321,6 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
             getLogger().debug("Unclean connection close.", t);
         }
     }
-
 
     @Override
     public void onTrigger(ProcessContext context, ProcessSessionFactory sessionFactory) throws ProcessException {
@@ -386,6 +365,7 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
         }
 
     }
+
 
     /**
      * Doesn't commit a session, leaving it up to the caller.
@@ -455,19 +435,6 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
         return problems;
     }
 
-    @OnUnscheduled
-    public void onUnscheduled(ProcessContext context) {
-        /*Set<Relationship> available = context.getAvailableRelationships();
-        if (available.isEmpty()) {
-            // backpressure engaged, disconnect the mqtt listener to stop piling things up
-            if (getLogger().isDebugEnabled()) {
-                getLogger().debug("Backpressure engaged for every connection, disconnecting from MQTT broker.");
-            }
-            disconnectMqtt();
-        }*/
-
-    }
-
     private void connectMqttBroker(ProcessContext context) throws MqttException {
         if (mqttClient != null && mqttClient.isConnected()) {
             return;
@@ -520,11 +487,11 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
     }
 
     private class NiFiMqttCallback implements MqttCallback {
+
         @Override
         public void connectionLost(Throwable cause) {
-            getLogger().warn("MQTT connection lost", cause);
+            getLogger().trace("MQTT connection lost", cause);
         }
-
         @Override
         public void messageArrived(String topic, MqttMessage message) throws Exception {
             if (getLogger().isDebugEnabled()) {
@@ -538,6 +505,8 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
 
             }
             org.apache.nifi.processors.mqtt.MqttMessage msg = PahoMqttToMsgTransformer.fromPahoMsg(topic, message);
+            // make it a blocking put() so that it can go through after
+            // we disconnect and drain the work queue in onStopped()
             msgBuffer.put(msg);
             if (getLogger().isTraceEnabled()) {
                 // blocking queue's size() operation is expensive
@@ -548,6 +517,65 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
         @Override
         public void deliveryComplete(IMqttDeliveryToken token) {
             // ignored, not relevant in this case
+        }
+
+    }
+
+    @OnStopped
+    public void onStopped() {
+        // disconnect asynchronously and consume the incoming network buffer and any pending messages
+        ExecutorService executor = Executors.newSingleThreadExecutor(
+                new BasicThreadFactory.Builder()
+                        .daemon(false)
+                        .priority(Thread.MIN_PRIORITY)
+                        .namingPattern("GetMQTT Disconnect Thread-%d")
+                        .build()
+        );
+        Future<?> disconnectFuture = executor.submit(new Runnable() {
+            @Override
+            public void run() {
+                disconnectMqtt();
+            }
+        });
+
+        while (mqttClient.isConnected()) {
+            while (!msgBuffer.isEmpty()) {
+                List work = new LinkedList<>();
+                msgBuffer.drainTo(work);
+                if (getLogger().isTraceEnabled()) {
+                    getLogger().trace("(@OnStopped) Processing {} laggard items", new Object[]{work.size()});
+                }
+
+                pushMessages(work);
+                session.commit();
+            }
+        }
+
+
+        try {
+            disconnectFuture.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException e) {
+            getLogger().trace("While disconnecting", e);
+        }
+
+        try {
+            executor.shutdown();
+            executor.awaitTermination(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            executor.shutdownNow();
+        }
+
+        if (getLogger().isTraceEnabled()) {
+            if (msgBuffer.isEmpty()) {
+                getLogger().trace("(@OnStopped) Work queue is now empty");
+            } else {
+                // must never happen
+                getLogger().trace("(@OnStopped) Work queue still has {} items", new Object[] {msgBuffer.size()});
+            }
         }
     }
 }

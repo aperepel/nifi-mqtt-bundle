@@ -11,6 +11,8 @@ import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.ValidationContext;
+import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.processor.AbstractSessionFactoryProcessor;
@@ -33,6 +35,7 @@ import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -61,6 +64,11 @@ import static org.apache.nifi.processors.mqtt.MqttNiFiConstants.ALLOWABLE_VALUE_
 })
 //@SeeAlso()
 public class GetMQTT extends AbstractSessionFactoryProcessor {
+
+    /**
+     * Max number of messages kept in an in-memory work queue.
+     */
+    public static final int DEFAULT_RECEIVE_BUFFER_CNT = 1;
 
     public static final PropertyDescriptor PROPERTY_BROKER_HOSTNAME = new PropertyDescriptor
                                                                  .Builder().name("host")
@@ -134,15 +142,12 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
                                                                   .defaultValue(ALLOWABLE_VALUE_CLEAN_SESSION_TRUE.getValue())
                                                                   .build();
 
-
-    // TODO expose in the UI and find the right place to flush/re-init on value change
     public static final PropertyDescriptor PROPERTY_RECEIVE_BUFFER = new PropertyDescriptor
                                                                  .Builder().name("receive-buffer-count")
                                                                  .displayName("Receive Buffer Count")
-                                                                 .description("Max number of messages queued up by this subscriber before they get routed into NiFi. " +
-                                                                              "This is a safety measure, as events must not be queueing up under normal conditions.")
+                                                                 .description("Max number of messages queued up by this subscriber before they get routed into NiFi.")
                                                                  .required(true)
-                                                                 .defaultValue(String.valueOf(1000000))
+                                                                 .defaultValue(String.valueOf(DEFAULT_RECEIVE_BUFFER_CNT))
                                                                  .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
                                                                  .build();
 
@@ -252,7 +257,8 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
     private Set<Relationship> relationships;
     private MqttClient mqttClient;
 
-    private BlockingQueue<org.apache.nifi.processors.mqtt.MqttMessage> msgBuffer = new LinkedBlockingQueue<>();
+    // we swap the buffer instances on resize, additionally make the ref volatile
+    private volatile BlockingQueue<org.apache.nifi.processors.mqtt.MqttMessage> msgBuffer;
 
     private volatile ProcessSession session;
 
@@ -270,7 +276,7 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
         descriptors.add(PROPERTY_MQTT_VERSION);
         descriptors.add(PROPERTY_CONN_TIMEOUT);
         descriptors.add(PROPERTY_KEEPALIVE_INTERVAL);
-//        descriptors.add(PROPERTY_RECEIVE_BUFFER);
+        descriptors.add(PROPERTY_RECEIVE_BUFFER);
         descriptors.add(PROPERTY_LWT_TOPIC);
         descriptors.add(PROPERTY_LWT_PAYLOAD);
         descriptors.add(PROPERTY_LWT_QOS);
@@ -304,6 +310,10 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
             }
         }
 
+        disconnectMqtt();
+    }
+
+    private void disconnectMqtt() {
         if (mqttClient == null || !mqttClient.isConnected()) {
             return;
         }
@@ -391,8 +401,48 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
         }
     }
 
+    @Override
+    public void onPropertyModified(PropertyDescriptor descriptor, String oldValue, String newValue) {
+        // resize the receive buffer, but preserve data
+        if (descriptor == PROPERTY_RECEIVE_BUFFER) {
+            // it's a mandatory integer, never null
+            int oldSize = Integer.valueOf(oldValue);
+            int newSize = Integer.valueOf(newValue);
+            int msgPending = msgBuffer.size();
+            if (msgPending > newSize) {
+                // TODO must not allow this, flag in the validation context
+                getLogger().warn("New receive buffer size ({}) is smaller than the number of messages pending ({}), ignoring resize request",
+                                 new Object[] { newSize, msgPending });
+                return;
+            }
+            BlockingQueue<org.apache.nifi.processors.mqtt.MqttMessage> newBuffer = new LinkedBlockingQueue<>(newSize);
+            msgBuffer.drainTo(newBuffer);
+            msgBuffer = newBuffer;
+        }
+    }
+
+    @Override
+    protected Collection<ValidationResult> customValidate(ValidationContext context) {
+        final List<ValidationResult> problems = new ArrayList<>(super.customValidate(context));
+        int newSize = context.getProperty(PROPERTY_RECEIVE_BUFFER).asInteger();
+        if (msgBuffer == null) {
+            msgBuffer = new LinkedBlockingQueue<>(context.getProperty(PROPERTY_RECEIVE_BUFFER).asInteger());
+        }
+        int msgPending = msgBuffer.size();
+        if (msgPending > newSize) {
+            problems.add(new ValidationResult.Builder()
+                                 .valid(false)
+                                 .subject("GetMQTT Configuration")
+                                 .explanation(String.format("%s (%d) is smaller than the number of messages pending (%d).",
+                                                            PROPERTY_RECEIVE_BUFFER.getDisplayName(), newSize, msgPending))
+                                 .build());
+        }
+
+        return problems;
+    }
+
     @OnUnscheduled
-    public void onUnscheduled() {
+    public void onUnscheduled(ProcessContext context) {
         // at this point there won't be synchronization issues,
         // as @TriggerSerially guarantees nothing else is consuming from the msgBuffer
         if (!msgBuffer.isEmpty()) {
@@ -404,6 +454,16 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
 
             pushMessages(work);
         }
+
+        /*Set<Relationship> available = context.getAvailableRelationships();
+        if (available.isEmpty()) {
+            // backpressure engaged, disconnect the mqtt listener to stop piling things up
+            if (getLogger().isDebugEnabled()) {
+                getLogger().debug("Backpressure engaged for every connection, disconnecting from MQTT broker.");
+            }
+            disconnectMqtt();
+        }*/
+
     }
 
     private void connectMqttBroker(ProcessContext context) throws MqttException {
@@ -469,7 +529,7 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
                 byte[] payload = message.getPayload();
                 String text = new String(payload, "UTF-8");
                 if (StringUtils.isAsciiPrintable(text)) {
-                    getLogger().debug("Message arrived from topic {}. Paylod: {}", new Object[] {topic, text});
+                    getLogger().debug("Message arrived from topic {}. Payload: {}", new Object[] {topic, text});
                 } else {
                     getLogger().debug("Message arrived from topic {}. Binary value of size {}", new Object[] {topic, payload.length});
                 }
@@ -477,6 +537,10 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
             }
             org.apache.nifi.processors.mqtt.MqttMessage msg = PahoMqttToMsgTransformer.fromPahoMsg(topic, message);
             msgBuffer.put(msg);
+            if (getLogger().isTraceEnabled()) {
+                // blocking queue's size() operation is expensive
+                getLogger().trace("New message buffer size: {}", new Object[] { msgBuffer.size() });
+            }
         }
 
         @Override

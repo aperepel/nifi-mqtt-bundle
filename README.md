@@ -18,7 +18,7 @@
 - For Last Will Topics the payload must be a String, no binary support. This makes sense, as we are configuring things via a UI.
 - Due to the nature of MQTT spec and underlying library implementation, NiFi's backpressure counts are not guaranteed to be precise when changing
   the `Receive Buffer Count`. The reason is an inherent message backlog on the network. Changing this setting from a default of `1` will yield
-  a much higher throughput, but after `GetMQTT` is stoped one might end up with a queue size of ~2x the backpressure limit. It won't go above that on
+  a much higher throughput, but after `GetMQTT` is stopped one might end up with a queue size of ~2x the backpressure limit. It won't go above that on
   component restart. The processor will go to lengths in order to flush the incoming messages from the memory buffer and network into NiFi, thus avoiding
   any message loss or having to implement more complex persistence strategies. **Above does not apply to a default setting of `1`**, which
   is plenty fast and has no surprises for a NiFi user.

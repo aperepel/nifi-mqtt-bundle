@@ -304,9 +304,7 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
     public void onStopped() {
         disconnectMqtt();
 
-        // at this point there won't be synchronization issues,
-        // as @TriggerSerially guarantees nothing else is consuming from the msgBuffer
-        if (!msgBuffer.isEmpty()) {
+        while (!msgBuffer.isEmpty()) {
             List work = new LinkedList<>();
             msgBuffer.drainTo(work);
             if (getLogger().isTraceEnabled()) {
@@ -320,24 +318,26 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
             if (msgBuffer.isEmpty()) {
                 getLogger().trace("(@OnStopped) Work queue is now empty");
             } else {
+                // must never happen
                 getLogger().trace("(@OnStopped) Work queue still has {} items", new Object[] {msgBuffer.size()});
             }
         }
     }
 
     private void disconnectMqtt() {
-        if (mqttClient == null || !mqttClient.isConnected()) {
+        if (mqttClient == null) {
             return;
         }
         try {
-            mqttClient.disconnect(5000L);
-        } catch (MqttException e) {
-            getLogger().warn("Error while disconnecting.", e);
+            // this timeout doesn't matter as it still is waiting for CONN_TIMEOUT seconds
+            mqttClient.disconnectForcibly(5000L);
+        } catch (Throwable t) {
+            getLogger().debug("Error while disconnecting.", t);
         }
         try {
             mqttClient.close();
-        } catch (MqttException e) {
-            // ignore
+        } catch (Throwable t) {
+            getLogger().debug("Unclean connection close.", t);
         }
     }
 

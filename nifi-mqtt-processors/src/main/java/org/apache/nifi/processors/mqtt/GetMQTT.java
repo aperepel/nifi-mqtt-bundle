@@ -302,6 +302,20 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
 
     @OnStopped
     public void onStopped() {
+        disconnectMqtt();
+
+        // at this point there won't be synchronization issues,
+        // as @TriggerSerially guarantees nothing else is consuming from the msgBuffer
+        if (!msgBuffer.isEmpty()) {
+            List work = new LinkedList<>();
+            msgBuffer.drainTo(work);
+            if (getLogger().isTraceEnabled()) {
+                getLogger().trace("(@OnStopped) Processing {} laggard items", new Object[] {work.size()});
+            }
+
+            pushMessages(work);
+        }
+
         if (getLogger().isTraceEnabled()) {
             if (msgBuffer.isEmpty()) {
                 getLogger().trace("(@OnStopped) Work queue is now empty");
@@ -309,8 +323,6 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
                 getLogger().trace("(@OnStopped) Work queue still has {} items", new Object[] {msgBuffer.size()});
             }
         }
-
-        disconnectMqtt();
     }
 
     private void disconnectMqtt() {
@@ -318,14 +330,14 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
             return;
         }
         try {
-            mqttClient.disconnect();
+            mqttClient.disconnect(5000L);
         } catch (MqttException e) {
             getLogger().warn("Error while disconnecting.", e);
         }
         try {
             mqttClient.close();
         } catch (MqttException e) {
-            getLogger().warn("Error while closing client connection.", e);
+            // ignore
         }
     }
 
@@ -406,13 +418,11 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
         // resize the receive buffer, but preserve data
         if (descriptor == PROPERTY_RECEIVE_BUFFER) {
             // it's a mandatory integer, never null
-            int oldSize = Integer.valueOf(oldValue);
             int newSize = Integer.valueOf(newValue);
             int msgPending = msgBuffer.size();
             if (msgPending > newSize) {
-                // TODO must not allow this, flag in the validation context
-                getLogger().warn("New receive buffer size ({}) is smaller than the number of messages pending ({}), ignoring resize request",
-                                 new Object[] { newSize, msgPending });
+                getLogger().debug("New receive buffer size ({}) is smaller than the number of messages pending ({}), ignoring resize request",
+                                  new Object[] { newSize, msgPending });
                 return;
             }
             BlockingQueue<org.apache.nifi.processors.mqtt.MqttMessage> newBuffer = new LinkedBlockingQueue<>(newSize);
@@ -443,18 +453,6 @@ public class GetMQTT extends AbstractSessionFactoryProcessor {
 
     @OnUnscheduled
     public void onUnscheduled(ProcessContext context) {
-        // at this point there won't be synchronization issues,
-        // as @TriggerSerially guarantees nothing else is consuming from the msgBuffer
-        if (!msgBuffer.isEmpty()) {
-            List work = new LinkedList<>();
-            msgBuffer.drainTo(work);
-            if (getLogger().isTraceEnabled()) {
-                getLogger().trace("(@OnUnscheduled) Processing {} laggard items", new Object[] {work.size()});
-            }
-
-            pushMessages(work);
-        }
-
         /*Set<Relationship> available = context.getAvailableRelationships();
         if (available.isEmpty()) {
             // backpressure engaged, disconnect the mqtt listener to stop piling things up
